@@ -1,26 +1,21 @@
+import json
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import Column, Integer, String, create_engine
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
+from pathlib import Path
 
-# DB setup
-DATABASE_URL = "sqlite:///./test.db"
+app = FastAPI()
+DATA_FILE = Path("users.json")
 
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
-SessionLocal = sessionmaker(bind=engine)
-Base = declarative_base()
+# Ensure JSON file exists
+if not DATA_FILE.exists():
+    DATA_FILE.write_text("[]")
 
-# Model
-class User(Base):
-    __tablename__ = "users"
-    id = Column(Integer, primary_key=True, index=True)
-    name = Column(String)
-    email = Column(String, unique=True, index=True)
+# Pydantic models
+class User(BaseModel):
+    id: int
+    name: str
+    email: str
 
-Base.metadata.create_all(bind=engine)
-
-# Schema
 class UserCreate(BaseModel):
     name: str
     email: str
@@ -29,68 +24,63 @@ class UserUpdate(BaseModel):
     name: str | None = None
     email: str | None = None
 
-app = FastAPI()
+# Helper functions
+def read_users():
+    with DATA_FILE.open("r") as f:
+        return json.load(f)
 
-# Dependency
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+def write_users(users):
+    with DATA_FILE.open("w") as f:
+        json.dump(users, f, indent=4)
+
+def get_next_id(users):
+    if not users:
+        return 1
+    return max(user["id"] for user in users) + 1
 
 # CREATE
-@app.post("/users/")
+@app.post("/users/", response_model=User)
 def create_user(user: UserCreate):
-    db = SessionLocal()
-    db_user = User(name=user.name, email=user.email)
-    db.add(db_user)
-    db.commit()
-    db.refresh(db_user)
-    return db_user
+    users = read_users()
+    new_user = {"id": get_next_id(users), "name": user.name, "email": user.email}
+    users.append(new_user)
+    write_users(users)
+    return new_user
 
 # READ ALL
-@app.get("/users/")
-def read_users():
-    db = SessionLocal()
-    return db.query(User).all()
+@app.get("/users/", response_model=list[User])
+def read_all_users():
+    return read_users()
 
 # READ ONE
-@app.get("/users/{user_id}")
+@app.get("/users/{user_id}", response_model=User)
 def read_user(user_id: int):
-    db = SessionLocal()
-    user = db.query(User).filter(User.id == user_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    return user
+    users = read_users()
+    for user in users:
+        if user["id"] == user_id:
+            return user
+    raise HTTPException(status_code=404, detail="User not found")
 
 # UPDATE
-@app.put("/users/{user_id}")
+@app.put("/users/{user_id}", response_model=User)
 def update_user(user_id: int, user_update: UserUpdate):
-    db = SessionLocal()
-    user = db.query(User).filter(User.id == user_id).first()
-
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-
-    if user_update.name:
-        user.name = user_update.name
-    if user_update.email:
-        user.email = user_update.email
-
-    db.commit()
-    db.refresh(user)
-    return user
+    users = read_users()
+    for user in users:
+        if user["id"] == user_id:
+            if user_update.name:
+                user["name"] = user_update.name
+            if user_update.email:
+                user["email"] = user_update.email
+            write_users(users)
+            return user
+    raise HTTPException(status_code=404, detail="User not found")
 
 # DELETE
 @app.delete("/users/{user_id}")
 def delete_user(user_id: int):
-    db = SessionLocal()
-    user = db.query(User).filter(User.id == user_id).first()
-
-    if not user:
+    users = read_users()
+    new_users = [user for user in users if user["id"] != user_id]
+    if len(new_users) == len(users):
         raise HTTPException(status_code=404, detail="User not found")
-
-    db.delete(user)
-    db.commit()
-    return {"message": "User deleted"}
+    write_users(new_users)
+    return {"message": "User deleted successfully"}
